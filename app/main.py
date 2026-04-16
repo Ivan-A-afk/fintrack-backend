@@ -5,8 +5,32 @@ from database import engine, get_db
 import models, os, shutil, base64, json, re
 from dotenv import load_dotenv
 import httpx
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "fintrack2026")
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_HOURS = 24
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer()
+
+def create_token(data: dict):
+    expire = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRE_HOURS)
+    data.update({"exp": expire})
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -21,16 +45,23 @@ app.add_middleware(
 
 os.makedirs("uploads", exist_ok=True)
 
+@app.post("/login")
+def login(data: dict):
+    if data.get("password") == APP_PASSWORD:
+        token = create_token({"sub": "fintrack"})
+        return {"token": token}
+    raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+
 @app.get("/persons")
-def get_persons(db: Session = Depends(get_db)):
+def get_persons(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     return db.query(models.Person).all()
 
 @app.get("/categories")
-def get_categories(db: Session = Depends(get_db)):
+def get_categories(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     return db.query(models.Category).all()
 
 @app.get("/expenses")
-def get_expenses(db: Session = Depends(get_db)):
+def get_expenses(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     return db.query(models.Expense).order_by(models.Expense.date.desc()).all()
 
 @app.post("/expenses")
@@ -40,7 +71,8 @@ def create_expense(
     amount: float = Form(...),
     commerce: str = Form(""),
     description: str = Form(""),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    token: dict = Depends(verify_token)
 ):
     expense = models.Expense(
         person_id=person_id,
@@ -55,7 +87,7 @@ def create_expense(
     return expense
 
 @app.delete("/expenses/{expense_id}")
-def delete_expense(expense_id: int, db: Session = Depends(get_db)):
+def delete_expense(expense_id: int, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
     if not expense:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
@@ -64,7 +96,7 @@ def delete_expense(expense_id: int, db: Session = Depends(get_db)):
     return {"mensaje": "Gasto eliminado"}
 
 @app.get("/stats")
-def get_stats(db: Session = Depends(get_db)):
+def get_stats(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     expenses = db.query(models.Expense).all()
     total = sum(float(e.amount) for e in expenses)
     ivan = sum(float(e.amount) for e in expenses if e.person_id == 1)
@@ -77,7 +109,7 @@ def get_stats(db: Session = Depends(get_db)):
     }
 
 @app.post("/scan")
-async def scan_image(file: UploadFile = File(...)):
+async def scan_image(file: UploadFile = File(...), token: dict = Depends(verify_token)):
     file_path = f"uploads/{file.filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -123,7 +155,6 @@ Solo responde el JSON, nada más."""
         )
 
     result = response.json()
-    print("RESPUESTA OPENROUTER:", result)
     text = result["choices"][0]["message"]["content"].strip()
     text = re.sub(r'```json|```', '', text).strip()
     data = json.loads(text)
